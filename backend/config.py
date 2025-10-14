@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     admin_token: str | None = None
     scheduler_enabled: bool = True
     request_timeout_seconds: int = 20
+    full_text_chunk_chars: int = 6000
+    full_text_chunk_overlap: int = 500
+    full_text_max_chunks: int = 6
+    sqlite_busy_timeout_seconds: int = 30
+    sqlite_journal_mode: str = "WAL"
 
     model_config = SettingsConfigDict(
         env_file=str(_ROOT_DIR / ".env"),

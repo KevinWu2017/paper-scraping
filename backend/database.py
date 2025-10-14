@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import Any
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import settings
@@ -21,7 +21,28 @@ def _build_engine(database_url: str) -> Any:
     connect_args: dict[str, Any] = {}
     if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
-    return create_engine(database_url, future=True, echo=False, connect_args=connect_args)
+        connect_args["timeout"] = max(1, settings.sqlite_busy_timeout_seconds)
+    engine = create_engine(database_url, future=True, echo=False, connect_args=connect_args)
+
+    if database_url.startswith("sqlite"):
+        _configure_sqlite_engine(engine)
+
+    return engine
+
+
+def _configure_sqlite_engine(engine: Any) -> None:
+    journal_mode = settings.sqlite_journal_mode
+    busy_timeout_ms = max(1, settings.sqlite_busy_timeout_seconds) * 1000
+
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+        cursor = dbapi_connection.cursor()
+        try:
+            if journal_mode:
+                cursor.execute(f"PRAGMA journal_mode={journal_mode}")
+            cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        finally:
+            cursor.close()
 
 
 def configure_engine(database_url: str | None = None) -> None:
@@ -53,7 +74,10 @@ def get_engine():
 def init_db() -> None:
     from . import models  # noqa: F401 -- ensure models are registered
 
-    Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    if engine is None:  # pragma: no cover - defensive guard
+        raise RuntimeError("Database engine is not configured")
+    Base.metadata.create_all(bind=engine)
     _ensure_schema()
 
 

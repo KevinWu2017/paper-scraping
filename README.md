@@ -5,7 +5,7 @@
 ## 功能亮点
 
 - 🚀 **定时抓取**：默认每天早上 08:00 自动从 arXiv RSS 获取并入库最新论文（可通过配置调整时间与时区）。
-- 🧠 **摘要生成**：支持调用阿里云百炼 Qwen 系列模型（兼容 OpenAI SDK），无密钥时自动回退到规则摘要。
+- 🧠 **摘要生成**：支持调用阿里云百炼 Qwen 系列模型（兼容 OpenAI SDK），会抓取 PDF 原文后执行全文摘要；无密钥时自动回退到规则摘要。
 - 🗄️ **持久化存储**：使用 SQLite/SQLAlchemy 保存论文与摘要，避免重复抓取。
 - 🖥️ **可视化前端**：内置 FastAPI+Jinja2 页面，快速筛选分类并查看摘要、原文链接和 PDF。
 - 🔧 **命令行工具**：`python -m backend.cli refresh` 即刻刷新数据，便于与定时任务结合。
@@ -39,6 +39,8 @@ PAPER_REFRESH_INTERVAL_MINUTES=180
 PAPER_SUMMARY_SENTENCE_COUNT=5
 PAPER_SUMMARY_LANGUAGE=zh
 PAPER_ADMIN_TOKEN=your-secret-token
+PAPER_SQLITE_BUSY_TIMEOUT_SECONDS=30
+PAPER_SQLITE_JOURNAL_MODE=WAL
 ```
 
 > 若未设置 `PAPER_LLM_API_KEY`，应用会使用简易摘要回退策略。
@@ -79,7 +81,15 @@ pytest
    docker build -t arxiv-paper-digest .
    ```
 
-2. **运行容器**（可选地挂载宿主机数据库文件与 `.env` 配置）
+2. **（可选）预创建 SQLite 文件**
+
+   ```bash
+   python scripts/init_sqlite.py
+   ```
+
+   > 若计划通过 `-v $(pwd)/papers.sqlite3:/app/papers.sqlite3` 挂载宿主机文件，需先在宿主机创建该文件；运行此脚本会按照当前配置自动生成。
+
+3. **运行容器**（可选地挂载宿主机数据库文件与 `.env` 配置）
 
    ```bash
    docker run -d \
@@ -92,7 +102,7 @@ pytest
 
    > `--env-file` 可以换成单独的 `-e` 环境变量；如果希望容器退出后保留数据，请保持卷挂载。
 
-3. **手动刷新/调试**
+4. **手动刷新/调试**
 
    ```bash
    docker exec -it arxiv-paper-digest python -m backend.cli refresh -c cs.DC
@@ -103,6 +113,7 @@ pytest
 ## 使用 LLM 生成摘要
 
 1. **配置密钥**：在 `.env`（或部署环境变量）中设置 `PAPER_LLM_API_KEY`，必要时同步调整 `PAPER_LLM_MODEL` 与 `PAPER_LLM_BASE_URL`。默认已指向阿里云百炼的兼容模式端点，可直接使用 `qwen-plus`、`qwen-max` 等模型。
+   - 默认会尝试从论文 PDF 提取文本并进行分段总结，可通过 `PAPER_FULL_TEXT_CHUNK_CHARS`、`PAPER_FULL_TEXT_CHUNK_OVERLAP`、`PAPER_FULL_TEXT_MAX_CHUNKS` 微调分段逻辑。
 2. **触发抓取 + 摘要**：
    - 命令行方式：`python -m backend.cli refresh`（可追加 `-c cs.DC` 指定分类）。
    - HTTP 接口：向 `POST /api/refresh` 发送请求；如配置了 `PAPER_ADMIN_TOKEN`，需在 Header 中附带 `X-Admin-Token`。

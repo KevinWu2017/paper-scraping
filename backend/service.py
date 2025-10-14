@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, List
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings, settings
+from .full_text import fetch_full_text
 from .models import Paper
 from .schemas import PaginatedPapers, PaperOut, RefreshResponse
 from .scraper import ScrapedPaper, fetch_all_categories
@@ -52,32 +54,42 @@ class PaperService:
         total = len(scraped)
         self._emit_progress(progress, 0, total, stats, None)
         for index, paper in enumerate(scraped, start=1):
-            persisted = self._get_by_arxiv_id(paper.arxiv_id)
-            if persisted:
-                self._update_existing(persisted, paper)
-                await self._summarize_if_needed(persisted, paper, stats)
+            existing = self._get_by_arxiv_id(paper.arxiv_id)
+            if existing is None:
+                entity = self._create_entity(paper)
+                created = True
             else:
-                entity = Paper(
-                    arxiv_id=paper.arxiv_id,
-                    title=paper.title,
-                    authors=";".join(paper.authors),
-                    author_affiliations=";".join(
-                        affiliation or "" for affiliation in getattr(paper, "affiliations", [])
-                    )
-                    if getattr(paper, "affiliations", None)
-                    else None,
-                    abstract=paper.abstract,
-                    categories=",".join(paper.categories),
-                    link=paper.link,
-                    pdf_url=paper.pdf_url,
-                    published_at=paper.published_at,
-                    updated_at=paper.updated_at,
-                )
+                entity = existing
+                created = False
+                self._update_existing(entity, paper)
+
+            summarized = await self._summarize_if_needed(entity, paper)
+
+            if created:
                 self.session.add(entity)
-                await self._summarize_if_needed(entity, paper, stats)
+
+            try:
+                self.session.commit()
+            except IntegrityError:
+                self.session.rollback()
+                existing = self._get_by_arxiv_id(paper.arxiv_id)
+                if existing is None:
+                    entity = self._create_entity(paper)
+                    created = True
+                    summarized = await self._summarize_if_needed(entity, paper)
+                    self.session.add(entity)
+                else:
+                    entity = existing
+                    created = False
+                    self._update_existing(entity, paper)
+                    summarized = await self._summarize_if_needed(entity, paper)
+                self.session.commit()
+
+            if created:
                 stats.created += 1
+            if summarized:
+                stats.summarized += 1
             self._emit_progress(progress, index, total, stats, paper)
-        self.session.commit()
         return stats
 
     def list_papers(self, *, category: str | None, limit: int, offset: int = 0) -> PaginatedPapers:
@@ -127,21 +139,22 @@ class PaperService:
         entity.updated_at = scraped.updated_at  # type: ignore[assignment]
         self.session.add(entity)
 
-    async def _summarize_if_needed(self, entity: Paper, paper: ScrapedPaper, stats: RefreshStats) -> None:
+    async def _summarize_if_needed(self, entity: Paper, paper: ScrapedPaper) -> bool:
         existing_summary = (entity.summary or "").strip()
         if existing_summary:
-            return
+            return False
         if not paper.abstract:
-            return
+            return False
         if not self.summarizer.uses_llm:
-            entity.summary = None  # type: ignore[assignment]
-            entity.summary_model = "not-run"  # type: ignore[assignment]
-            entity.summary_language = None  # type: ignore[assignment]
-            entity.last_summarized_at = None  # type: ignore[assignment]
-            self.session.add(entity)
-            return
+            self._mark_summary_not_run(entity)
+            return False
         try:
-            summary_text = await self.summarizer.summarize(paper.title, paper.abstract)
+            full_text = await self._load_full_text(paper)
+            summary_text = await self.summarizer.summarize(
+                paper.title,
+                paper.abstract,
+                full_text=full_text,
+            )
         except Exception:
             summary_text = ""
         if summary_text:
@@ -150,13 +163,49 @@ class PaperService:
                 model=self.settings.llm_model,
                 language=self.settings.summary_language,
             )
-            stats.summarized += 1
-        else:
-            entity.summary = None  # type: ignore[assignment]
-            entity.summary_model = "llm-failed"  # type: ignore[assignment]
-            entity.summary_language = None  # type: ignore[assignment]
-            entity.last_summarized_at = None  # type: ignore[assignment]
-        self.session.add(entity)
+            return True
+        self._mark_summary_failed(entity)
+        return False
+
+    def _create_entity(self, paper: ScrapedPaper) -> Paper:
+        return Paper(
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=";".join(paper.authors),
+            author_affiliations=";".join(
+                affiliation or "" for affiliation in getattr(paper, "affiliations", [])
+            )
+            if getattr(paper, "affiliations", None)
+            else None,
+            abstract=paper.abstract,
+            categories=",".join(paper.categories),
+            link=paper.link,
+            pdf_url=paper.pdf_url,
+            published_at=paper.published_at,
+            updated_at=paper.updated_at,
+        )
+
+    @staticmethod
+    def _mark_summary_not_run(entity: Paper) -> None:
+        entity.summary = None  # type: ignore[assignment]
+        entity.summary_model = "not-run"  # type: ignore[assignment]
+        entity.summary_language = None  # type: ignore[assignment]
+        entity.last_summarized_at = None  # type: ignore[assignment]
+
+    @staticmethod
+    def _mark_summary_failed(entity: Paper) -> None:
+        entity.summary = None  # type: ignore[assignment]
+        entity.summary_model = "llm-failed"  # type: ignore[assignment]
+        entity.summary_language = None  # type: ignore[assignment]
+        entity.last_summarized_at = None  # type: ignore[assignment]
+
+    async def _load_full_text(self, paper: ScrapedPaper) -> str:
+        if not self.summarizer.uses_llm:
+            return ""
+        try:
+            return await fetch_full_text(paper.arxiv_id, paper.pdf_url, self.settings)
+        except Exception:
+            return ""
 
     @staticmethod
     def _emit_progress(
