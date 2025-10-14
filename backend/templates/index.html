@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ArXiv 论文速览</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body
+    data-categories='{{ categories | tojson | safe }}'
+    data-default-category='{{ default_category | tojson | safe }}'
+  >
+    <header class="layout__header">
+      <h1>ArXiv 论文速览</h1>
+      <p class="tagline">自动抓取 cs.DC / cs.OS / cs.AR 最新论文并生成总结，系统会在每日 08:00 自动更新最新论文</p>
+    </header>
+
+    <main class="layout__main">
+      <section class="category-bar">
+        <nav id="category-nav" class="category-nav" aria-label="论文分类"></nav>
+        <!-- <p class="category-hint">系统会在每日 08:00 自动更新最新论文。</p> -->
+      </section>
+
+      <section>
+        <ol id="paper-list" class="paper-list"></ol>
+      </section>
+    </main>
+
+    <template id="paper-template">
+      <li class="paper-item">
+        <div class="paper-item__header">
+          <div class="paper-item__meta-row">
+            <div class="paper-tags"></div>
+            <time class="paper-date"></time>
+          </div>
+          <h2 class="paper-title">
+            <a class="paper-link" target="_blank" rel="noopener"></a>
+          </h2>
+        </div>
+        <div class="paper-authors">
+          <h3>作者</h3>
+          <ul class="paper-authors__list"></ul>
+        </div>
+        <details class="paper-section paper-summary" open>
+          <summary class="paper-section__toggle">LLM 摘要</summary>
+          <div class="paper-section__content paper-summary__content"></div>
+        </details>
+        <details class="paper-section paper-abstract">
+          <summary class="paper-section__toggle">原始摘要</summary>
+          <div class="paper-section__content paper-abstract__content"></div>
+        </details>
+        <div class="paper-meta">
+          <div class="paper-meta__links">
+            <a class="paper-pdf" target="_blank" rel="noopener">PDF</a>
+            <a class="paper-source" target="_blank" rel="noopener">arXiv 页面</a>
+          </div>
+          <div class="paper-meta__model"></div>
+        </div>
+      </li>
+    </template>
+
+    <script>
+      const bodyDataset = document.body.dataset;
+      const defaultCategory = JSON.parse(bodyDataset.defaultCategory || "null");
+
+      const categoryNav = document.getElementById("category-nav");
+  const paperList = document.getElementById("paper-list");
+  const paperTemplate = document.getElementById("paper-template");
+      const allowedCategories = ["cs.DC", "cs.OS", "cs.AR"];
+      let currentCategory = null;
+
+      function buildCategoryNav() {
+        const initial = allowedCategories.includes(defaultCategory)
+          ? defaultCategory
+          : allowedCategories[0];
+        currentCategory = initial;
+
+        for (const category of allowedCategories) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "category-nav__item";
+          button.dataset.category = category;
+          button.textContent = category;
+          if (category === currentCategory) {
+            button.classList.add("is-active");
+          }
+          button.addEventListener("click", () => {
+            if (currentCategory === category) {
+              return;
+            }
+            currentCategory = category;
+            updateActiveCategory();
+            loadPapers();
+          });
+          categoryNav.append(button);
+        }
+      }
+
+      function updateActiveCategory() {
+        for (const button of categoryNav.querySelectorAll(".category-nav__item")) {
+          button.classList.toggle("is-active", button.dataset.category === currentCategory);
+        }
+      }
+
+      function renderPapers(papers) {
+        paperList.innerHTML = "";
+        if (!papers.length) {
+          paperList.innerHTML = '<li class="empty">当前分类暂无论文</li>';
+          return;
+        }
+
+        for (const paper of papers) {
+          const clone = paperTemplate.content.cloneNode(true);
+          const linkEl = clone.querySelector(".paper-link");
+          linkEl.textContent = paper.title;
+          linkEl.href = paper.link;
+
+          const dateEl = clone.querySelector(".paper-date");
+          const publishedAt = new Date(paper.published_at);
+          if (!Number.isNaN(publishedAt.getTime())) {
+            dateEl.dateTime = publishedAt.toISOString();
+            dateEl.textContent = new Intl.DateTimeFormat("zh-CN", {
+              dateStyle: "medium",
+              timeStyle: "short",
+              timeZone: "Asia/Shanghai",
+            }).format(publishedAt);
+          } else {
+            dateEl.textContent = "发布时间未知";
+          }
+
+          const tagsContainer = clone.querySelector(".paper-tags");
+          tagsContainer.innerHTML = "";
+          paper.categories.forEach((cat) => {
+            const chip = document.createElement("span");
+            chip.className = "paper-tag";
+            const slug = cat.toLowerCase().replace(/\./g, "-");
+            chip.classList.add(`paper-tag--${slug}`);
+            chip.textContent = cat;
+            tagsContainer.append(chip);
+          });
+
+          const authorsList = clone.querySelector(".paper-authors__list");
+          paper.authors.forEach((name, index) => {
+            const li = document.createElement("li");
+            const affiliation = paper.affiliations?.[index];
+            li.textContent = affiliation ? `${name}（${affiliation}）` : name;
+            authorsList.append(li);
+          });
+
+          const summaryEl = clone.querySelector(".paper-summary__content");
+          if (paper.summary_model === "not-run") {
+            summaryEl.textContent = "未调用 LLM";
+          } else if (paper.summary_model === "llm-failed") {
+            summaryEl.textContent = "LLM 调用失败，暂无摘要";
+          } else {
+            summaryEl.textContent = paper.summary || "暂无摘要";
+          }
+
+          const abstractEl = clone.querySelector(".paper-abstract__content");
+          abstractEl.textContent = paper.abstract;
+
+          const pdfLink = clone.querySelector(".paper-pdf");
+          if (paper.pdf_url) {
+            pdfLink.href = paper.pdf_url;
+          } else {
+            pdfLink.remove();
+          }
+
+          const sourceLink = clone.querySelector(".paper-source");
+          sourceLink.href = paper.link;
+
+          const summaryMeta = clone.querySelector(".paper-meta__model");
+          summaryMeta.innerHTML = "";
+          if (paper.summary_model === "not-run") {
+            const infoSpan = document.createElement("span");
+            infoSpan.className = "paper-meta__pending";
+            infoSpan.textContent = "未调用 LLM";
+            summaryMeta.append(infoSpan);
+          } else if (paper.summary_model === "llm-failed") {
+            const failSpan = document.createElement("span");
+            failSpan.className = "paper-meta__pending";
+            failSpan.textContent = "LLM 调用失败";
+            summaryMeta.append(failSpan);
+          } else if (paper.summary) {
+            const modelSpan = document.createElement("span");
+            const modelName = paper.summary_model && paper.summary_model !== "fallback"
+              ? paper.summary_model
+              : "规则摘要";
+            modelSpan.textContent = `摘要模型：${modelName}`;
+            summaryMeta.append(modelSpan);
+            if (paper.last_summarized_at) {
+              const updated = new Date(paper.last_summarized_at);
+              if (!Number.isNaN(updated.getTime())) {
+                const updatedSpan = document.createElement("span");
+                updatedSpan.textContent = `更新：${new Intl.DateTimeFormat("zh-CN", {
+                  dateStyle: "short",
+                  timeStyle: "short",
+                  timeZone: "Asia/Shanghai",
+                }).format(updated)}`;
+                summaryMeta.append(updatedSpan);
+              }
+            }
+          } else {
+            const pendingSpan = document.createElement("span");
+            pendingSpan.className = "paper-meta__pending";
+            pendingSpan.textContent = "摘要尚未生成";
+            summaryMeta.append(pendingSpan);
+          }
+          paperList.append(clone);
+        }
+      }
+
+      async function fetchJSON(url, options = {}) {
+        const response = await fetch(url, options);
+        if (!response.ok) {
+          throw new Error(`请求失败：${response.status}`);
+        }
+        return response.json();
+      }
+
+      async function loadPapers() {
+        if (!currentCategory) {
+          return;
+        }
+        paperList.innerHTML = '<li class="empty">加载中…</li>';
+        try {
+          const data = await fetchJSON(`/api/papers?category=${encodeURIComponent(currentCategory)}&limit=40`);
+          renderPapers(data.items);
+        } catch (error) {
+          console.error(error);
+          paperList.innerHTML = '<li class="empty">获取论文失败，请稍后重试</li>';
+        }
+      }
+
+      async function bootstrap() {
+        buildCategoryNav();
+        updateActiveCategory();
+        await loadPapers();
+      }
+
+      bootstrap();
+    </script>
+  </body>
+</html>
