@@ -13,7 +13,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from .config import settings
 
-ARXIV_RSS_BASE = "https://export.arxiv.org/rss"
+ARXIV_RSS_BASE = "https://rss.arxiv.org/rss"
 
 
 @dataclass(slots=True)

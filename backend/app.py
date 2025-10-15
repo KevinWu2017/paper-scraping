@@ -90,7 +90,18 @@ async def scheduled_refresh_job() -> None:
     session = create_session()
     try:
         service = PaperService(session=session)
-        await service.refresh()
+        try:
+            stats = await service.refresh()
+        except Exception:
+            logger.exception("Scheduled refresh failed")
+            raise
+        else:
+            logger.info(
+                "Scheduled refresh finished: fetched=%s created=%s summarized=%s",
+                stats.fetched,
+                stats.created,
+                stats.summarized,
+            )
     finally:
         session.close()
 
@@ -124,6 +135,12 @@ async def refresh_endpoint(
     if settings.admin_token and x_admin_token != settings.admin_token:
         raise HTTPException(status_code=401, detail="Invalid admin token")
     stats = await service.refresh()
+    logger.info(
+        "Manual refresh finished: fetched=%s created=%s summarized=%s",
+        stats.fetched,
+        stats.created,
+        stats.summarized,
+    )
     return stats.to_response()
 
 

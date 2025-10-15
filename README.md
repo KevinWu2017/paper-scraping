@@ -41,6 +41,7 @@ PAPER_SUMMARY_LANGUAGE=zh
 PAPER_ADMIN_TOKEN=your-secret-token
 PAPER_SQLITE_BUSY_TIMEOUT_SECONDS=30
 PAPER_SQLITE_JOURNAL_MODE=WAL
+PAPER_SCHEDULER_TIMEZONE=Asia/Shanghai
 ```
 
 > 若未设置 `PAPER_LLM_API_KEY`，应用会使用简易摘要回退策略。
@@ -101,6 +102,7 @@ pytest
    ```
 
    > `--env-file` 可以换成单独的 `-e` 环境变量；如果希望容器退出后保留数据，请保持卷挂载。
+   > 镜像默认时区为 `Asia/Shanghai`，可通过 `-e TZ=...` 覆盖。
 
 4. **手动刷新/调试**
 
